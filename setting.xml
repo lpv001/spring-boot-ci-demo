@@ -3,7 +3,7 @@
     <mirrors>
         <mirror>
             <id>nexus-public</id>
-            <name>Internal Nexus</name>
+            <name>Nexus Maven Group</name>
             <url>http://nexus.nexus.svc.cluster.local:8081/repository/maven-public/</url>
             <mirrorOf>*</mirrorOf>
         </mirror>
@@ -11,9 +11,9 @@
 
     <servers>
         <server>
-            <id>nexus-snapshots</id>
-            <username>maven-publisher</username>
-            <password>12345678</password>
+            <id>nexus-public</id>
+            <username>${env.NEXUS_READ_USER}</username>
+            <password>${env.NEXUS_READ_PASSWORD}</password>
         </server>
     </servers>
 </settings>
