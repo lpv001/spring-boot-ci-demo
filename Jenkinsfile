@@ -1,4 +1,48 @@
 
+import groovy.xml.XmlUtil
+
+def writeMavenSettings(
+    String outputPath,
+    String nexusUrl,
+    String groupRepo,
+    String readUser,
+    String readPassword,
+    String publishUser = null,
+    String publishPassword = null
+) {
+    def settings = new groovy.util.Node(null, 'settings', [
+        xmlns: 'http://maven.apache.org/SETTINGS/1.2.0'
+    ])
+
+    def mirrors = settings.appendNode('mirrors')
+    def mirror = mirrors.appendNode('mirror')
+    mirror.appendNode('id', 'nexus-public')
+    mirror.appendNode('name', 'Nexus Maven Group')
+    mirror.appendNode('url', "${nexusUrl}/repository/${groupRepo}/")
+    mirror.appendNode('mirrorOf', '*')
+
+    def servers = settings.appendNode('servers')
+
+    def readServer = servers.appendNode('server')
+    readServer.appendNode('id', 'nexus-public')
+    readServer.appendNode('username', readUser)
+    readServer.appendNode('password', readPassword)
+
+    if (publishUser != null && publishPassword != null) {
+        def publishServer = servers.appendNode('server')
+        publishServer.appendNode('id', 'nexus-snapshots')
+        publishServer.appendNode('username', publishUser)
+        publishServer.appendNode('password', publishPassword)
+    }
+
+    // Serialize XML with proper escaping.
+    def xml = XmlUtil.serialize(settings)
+
+    new File(outputPath).withWriter('UTF-8') { writer ->
+        writer.write(xml)
+    }
+}
+
 pipeline {
     agent any
 
@@ -115,59 +159,35 @@ echo "OK: Maven mirror points to Nexus maven-public."
                         passwordVariable: 'NEXUS_READ_PASSWORD'
                     )
                 ]) {
-                    sh '''
+                    script {
+                        def settingsPath =
+                            "${pwd(tmp: true)}/maven-settings-${env.BUILD_NUMBER}.xml"
+
+                        writeMavenSettings(
+                            settingsPath,
+                            env.NEXUS_URL,
+                            env.NEXUS_GROUP_REPO,
+                            env.NEXUS_READ_USER,
+                            env.NEXUS_READ_PASSWORD
+                        )
+
+                        try {
+                            sh '''
 set -eu
 set +x
-umask 077
-
-SETTINGS_FILE="$(mktemp)"
-trap 'rm -f "$SETTINGS_FILE"' EXIT
-
-# Escape XML special characters in credentials.
-xml_escape() {
-    printf '%s' "$1" |
-        sed \
-            -e 's/\&/\&amp;/g' \
-            -e 's/</\&lt;/g' \
-            -e 's/>/\&gt;/g' \
-            -e 's/"/\&quot;/g' \
-            -e "s/'/\\&apos;/g"
-}
-
-READ_USER_XML="$(xml_escape "$NEXUS_READ_USER")"
-READ_PASSWORD_XML="$(xml_escape "$NEXUS_READ_PASSWORD")"
-
-# Generate a temporary Maven settings file.
-cat > "$SETTINGS_FILE" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0">
-    <mirrors>
-        <mirror>
-            <id>nexus-public</id>
-            <name>Nexus Maven Group</name>
-            <url>${NEXUS_URL}/repository/${NEXUS_GROUP_REPO}/</url>
-            <mirrorOf>*</mirrorOf>
-        </mirror>
-    </mirrors>
-    <servers>
-        <server>
-            <id>nexus-public</id>
-            <username>${READ_USER_XML}</username>
-            <password>${READ_PASSWORD_XML}</password>
-        </server>
-    </servers>
-</settings>
-EOF
-
-echo "========== Maven Clean and Verify =========="
 
 mvn -B \
     -s "$SETTINGS_FILE" \
     -Dmaven.repo.local="$MAVEN_LOCAL_REPO" \
     clean verify
-
-echo "Maven tests and verification completed."
-'''
+'''.replace(
+                                '$SETTINGS_FILE',
+                                settingsPath
+                            )
+                        } finally {
+                            sh "rm -f '${settingsPath}'"
+                        }
+                    }
                 }
             }
 
@@ -195,67 +215,37 @@ echo "Maven tests and verification completed."
                         passwordVariable: 'NEXUS_PUBLISH_PASSWORD'
                     )
                 ]) {
-                    sh '''
+                    script {
+                        def settingsPath =
+                            "${pwd(tmp: true)}/maven-deploy-settings-${env.BUILD_NUMBER}.xml"
+
+                        writeMavenSettings(
+                            settingsPath,
+                            env.NEXUS_URL,
+                            env.NEXUS_GROUP_REPO,
+                            env.NEXUS_READ_USER,
+                            env.NEXUS_READ_PASSWORD,
+                            env.NEXUS_PUBLISH_USER,
+                            env.NEXUS_PUBLISH_PASSWORD
+                        )
+
+                        try {
+                            sh '''
 set -eu
 set +x
-umask 077
-
-SETTINGS_FILE="$(mktemp)"
-trap 'rm -f "$SETTINGS_FILE"' EXIT
-
-# Escape XML special characters in credentials.
-xml_escape() {
-    printf '%s' "$1" |
-        sed \
-            -e 's/\&/\&amp;/g' \
-            -e 's/</\&lt;/g' \
-            -e 's/>/\&gt;/g' \
-            -e 's/"/\&quot;/g' \
-            -e "s/'/\\&apos;/g"
-}
-
-READ_USER_XML="$(xml_escape "$NEXUS_READ_USER")"
-READ_PASSWORD_XML="$(xml_escape "$NEXUS_READ_PASSWORD")"
-PUBLISH_USER_XML="$(xml_escape "$NEXUS_PUBLISH_USER")"
-PUBLISH_PASSWORD_XML="$(xml_escape "$NEXUS_PUBLISH_PASSWORD")"
-
-# Generate a temporary Maven settings file with separate read
-# and publish credentials.
-cat > "$SETTINGS_FILE" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0">
-    <mirrors>
-        <mirror>
-            <id>nexus-public</id>
-            <name>Nexus Maven Group</name>
-            <url>${NEXUS_URL}/repository/${NEXUS_GROUP_REPO}/</url>
-            <mirrorOf>*</mirrorOf>
-        </mirror>
-    </mirrors>
-    <servers>
-        <server>
-            <id>nexus-public</id>
-            <username>${READ_USER_XML}</username>
-            <password>${READ_PASSWORD_XML}</password>
-        </server>
-        <server>
-            <id>nexus-snapshots</id>
-            <username>${PUBLISH_USER_XML}</username>
-            <password>${PUBLISH_PASSWORD_XML}</password>
-        </server>
-    </servers>
-</settings>
-EOF
-
-echo "========== Publish Maven Artifact =========="
 
 mvn -B \
     -s "$SETTINGS_FILE" \
     -Dmaven.repo.local="$MAVEN_LOCAL_REPO" \
     deploy
-
-echo "Maven deploy completed."
-'''
+'''.replace(
+                                '$SETTINGS_FILE',
+                                settingsPath
+                            )
+                        } finally {
+                            sh "rm -f '${settingsPath}'"
+                        }
+                    }
                 }
             }
         }
@@ -274,9 +264,6 @@ find . -type f -path '*/target/*.jar' \
 
 echo "========== Built Commit =========="
 git rev-parse HEAD
-
-echo "========== Build Summary =========="
-echo "Application verification and Nexus deployment completed."
 '''
             }
         }
