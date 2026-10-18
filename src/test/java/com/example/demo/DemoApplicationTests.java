@@ -54,7 +54,7 @@ class DemoApplicationTests {
 				"X-CLIENT-ID:" + clientId + "\n" +
 				"X-REQ-ID:" + requestId;
 
-		byte[] signatureBytes = Base64.getDecoder().decode(receivedSignature);
+		byte[] signatureBytes = Base64.getUrlDecoder().decode(receivedSignature);
 
 		Signature signature = Signature.getInstance("SHA256withRSA");
 		signature.initVerify(publicKey);
