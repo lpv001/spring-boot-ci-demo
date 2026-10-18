@@ -1,0 +1,15 @@
+server.port: 55555
+spring:
+  application:
+    name: demo
+ 
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+
+  endpoint:
+    health:
+      probes:
+        enabled: true
