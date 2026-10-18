@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<!-- <?xml version="1.0" encoding="UTF-8"?>
 <settings xmlns="http://maven.apache.org/SETTINGS/1.2.0">
     <mirrors>
         <mirror>
@@ -16,4 +16,4 @@
             <password>${env.NEXUS_READ_PASSWORD}</password>
         </server>
     </servers>
-</settings>
+</settings> -->
