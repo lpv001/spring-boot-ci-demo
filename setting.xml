@@ -12,8 +12,8 @@
     <servers>
         <server>
             <id>nexus-snapshots</id>
-            <username>${env.NEXUS_USERNAME}</username>
-            <password>${env.NEXUS_PASSWORD}</password>
+            <username>${env.NEXUS_USERNAME:maven-publisher}</username>
+            <password>${env.NEXUS_PASSWORD:12345678}</password>
         </server>
     </servers>
 </settings>
