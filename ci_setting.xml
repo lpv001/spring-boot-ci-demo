@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0">
+    <mirrors>
+        <mirror>
+            <id>nexus-public</id>
+            <name>Nexus Maven Group</name>
+            <url>http://nexus.nexus.svc.cluster.local:8081/repository/maven-public/</url>
+            <mirrorOf>*</mirrorOf>
+        </mirror>
+    </mirrors>
+</settings>

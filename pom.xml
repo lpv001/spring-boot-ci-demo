@@ -51,6 +51,10 @@
 			<id>nexus-snapshots</id>
 			<url>http://nexus.nexus.svc.cluster.local:8081/repository/maven-snapshots/</url>
 		</snapshotRepository>
+		<repository>
+			<id>nexus-releases</id>
+			<url>http://nexus.nexus.svc.cluster.local:8081/repository/maven-releases/</url>
+		</repository>
 	</distributionManagement>
 
 	<build>
