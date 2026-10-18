@@ -9,10 +9,12 @@ pipeline {
     options {
         timestamps()
         disableConcurrentBuilds()
-        buildDiscarder(logRotator(
-            numToKeepStr: '20',
-            artifactNumToKeepStr: '10'
-        ))
+        buildDiscarder(
+            logRotator(
+                numToKeepStr: '20',
+                artifactNumToKeepStr: '10'
+            )
+        )
     }
 
     environment {
@@ -20,27 +22,44 @@ pipeline {
         NEXUS_GROUP_REPO = 'maven-public'
         NEXUS_SNAPSHOT_REPO = 'maven-snapshots'
 
-        // Isolate this build from any pre-existing Maven cache.
         MAVEN_LOCAL_REPO = "${WORKSPACE}/.m2-ci"
     }
 
     stages {
+
         stage('Check Build Environment') {
             steps {
                 sh '''
-                    set -eu
+set -eu
 
-                    echo "Java:"
-                    java -version
+echo "========== Java =========="
+java -version
 
-                    echo "Maven:"
-                    mvn -version
+echo "========== Maven =========="
+mvn -version
+'''
 
-                    echo "Checking Nexus Maven group..."
-                    curl --fail --silent --show-error \
-                      "$NEXUS_URL/repository/$NEXUS_GROUP_REPO/" \
-                      -o /dev/null
-                '''
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'nexus-reader',
+                        usernameVariable: 'NEXUS_READ_USER',
+                        passwordVariable: 'NEXUS_READ_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+set -eu
+set +x
+
+echo "========== Nexus Connectivity =========="
+
+curl --fail --silent --show-error \
+  --user "$NEXUS_READ_USER:$NEXUS_READ_PASSWORD" \
+  "$NEXUS_URL/repository/$NEXUS_GROUP_REPO/" \
+  -o /dev/null
+
+echo "Nexus authentication successful."
+'''
+                }
             }
         }
 
@@ -49,52 +68,49 @@ pipeline {
                 checkout scm
 
                 sh '''
-                    echo "Git commit:"
-                    git rev-parse HEAD
+set -eu
 
-                    echo "Project files:"
-                    ls -la
-                    test -f pom.xml
-                '''
+echo "========== Git Commit =========="
+git rev-parse HEAD
+
+echo "========== Project Files =========="
+ls -la
+
+test -f pom.xml
+test -f ci-settings.xml
+'''
             }
         }
 
-        stage('Verify Maven Uses Nexus') {
+        stage('Validate Nexus Mirror') {
             steps {
                 sh '''
-                    set -eu
+set -eu
 
-                    test -f "$WORKSPACE/ci-settings.xml"
+python3 -c '
+import xml.etree.ElementTree as ET
 
-                    echo "Maven mirror configuration:"
-                    python3 - <<'PY'
-                    import xml.etree.ElementTree as ET
-                    import os
+root = ET.parse("ci-settings.xml").getroot()
+ns = {"m": root.tag.split("}")[0].strip("{")}
 
-                    path = os.path.join(
-                        os.environ["WORKSPACE"], "ci-settings.xml"
-                    )
-                    root = ET.parse(path).getroot()
-                    ns = {"m": root.tag.split("}")[0].strip("{")}
+mirrors = root.findall("m:mirrors/m:mirror", ns)
 
-                    mirrors = root.findall("m:mirrors/m:mirror", ns)
-                    found = any(
-                        m.findtext("m:mirrorOf", default="", namespaces=ns) == "*"
-                        and "maven-public" in m.findtext(
-                            "m:url", default="", namespaces=ns
-                        )
-                        for m in mirrors
-                    )
+valid = any(
+    mirror.findtext("m:mirrorOf", default="", namespaces=ns) == "*"
+    and mirror.findtext("m:url", default="", namespaces=ns).rstrip("/").endswith(
+        "/repository/maven-public"
+    )
+    for mirror in mirrors
+)
 
-                    if not found:
-                        raise SystemExit(
-                            "ERROR: ci-settings.xml must mirror * "
-                            "to the Nexus maven-public group"
-                        )
+if not valid:
+    raise SystemExit(
+        "ERROR: ci-settings.xml must mirror * to Nexus maven-public"
+    )
 
-                    print("OK: all Maven repository IDs are mirrored to Nexus")
-                    PY
-                '''
+print("OK: Maven mirror points to Nexus maven-public")
+'
+'''
             }
         }
 
@@ -108,98 +124,154 @@ pipeline {
                     )
                 ]) {
                     sh '''
-                        set -eu
-                        set +x
+set -eu
+set +x
 
-                        mvn -B \
-                        -s "$WORKSPACE/ci-settings.xml" \
-                        -Dmaven.repo.local="$MAVEN_LOCAL_REPO" \
-                        clean verify
-                    '''
+SETTINGS_FILE="$(mktemp)"
+chmod 600 "$SETTINGS_FILE"
+trap 'rm -f "$SETTINGS_FILE"' EXIT
+
+python3 - "$WORKSPACE/ci-settings.xml" "$SETTINGS_FILE" <<'PY'
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+source, destination = sys.argv[1], sys.argv[2]
+tree = ET.parse(source)
+root = tree.getroot()
+namespace = root.tag.split("}")[0].strip("{")
+tag = lambda name: "{%s}%s" % (namespace, name)
+
+servers = root.find(tag("servers"))
+if servers is None:
+    servers = ET.SubElement(root, tag("servers"))
+
+server = ET.SubElement(servers, tag("server"))
+ET.SubElement(server, tag("id")).text = "nexus-public"
+ET.SubElement(server, tag("username")).text = os.environ["NEXUS_READ_USER"]
+ET.SubElement(server, tag("password")).text = os.environ["NEXUS_READ_PASSWORD"]
+
+tree.write(destination, encoding="UTF-8", xml_declaration=True)
+PY
+
+echo "========== Maven Clean and Verify =========="
+
+mvn -B \
+  -s "$SETTINGS_FILE" \
+  -Dmaven.repo.local="$MAVEN_LOCAL_REPO" \
+  clean verify
+'''
+                }
+            }
+
+            post {
+                always {
+                    junit(
+                        testResults: '**/target/surefire-reports/TEST-*.xml',
+                        allowEmptyResults: true
+                    )
                 }
             }
         }
 
-        stage('Publish JAR to Nexus') {
+        stage('Publish to Nexus') {
             steps {
                 withCredentials([
                     usernamePassword(
+                        credentialsId: 'nexus-reader',
+                        usernameVariable: 'NEXUS_READ_USER',
+                        passwordVariable: 'NEXUS_READ_PASSWORD'
+                    ),
+                    usernamePassword(
                         credentialsId: 'nexus-publisher',
-                        usernameVariable: 'NEXUS_USERNAME',
-                        passwordVariable: 'NEXUS_PASSWORD'
+                        usernameVariable: 'NEXUS_PUBLISH_USER',
+                        passwordVariable: 'NEXUS_PUBLISH_PASSWORD'
                     )
                 ]) {
                     sh '''
-                        set -eu
-                        set +x
+set -eu
+set +x
 
-                        SETTINGS_FILE="$(mktemp)"
-                        chmod 600 "$SETTINGS_FILE"
+SETTINGS_FILE="$(mktemp)"
+chmod 600 "$SETTINGS_FILE"
+trap 'rm -f "$SETTINGS_FILE"' EXIT
 
-                        trap 'rm -f "$SETTINGS_FILE"' EXIT
+python3 - "$WORKSPACE/ci-settings.xml" "$SETTINGS_FILE" <<'PY'
+import os
+import sys
+import xml.etree.ElementTree as ET
 
-                        python3 - "$WORKSPACE/ci-settings.xml" "$SETTINGS_FILE" <<'PY'
-                        import os
-                        import sys
-                        import xml.etree.ElementTree as ET
+source, destination = sys.argv[1], sys.argv[2]
+tree = ET.parse(source)
+root = tree.getroot()
+namespace = root.tag.split("}")[0].strip("{")
+tag = lambda name: "{%s}%s" % (namespace, name)
 
-                        source, destination = sys.argv[1], sys.argv[2]
-                        tree = ET.parse(source)
-                        root = tree.getroot()
-                        ns = {"m": root.tag.split("}")[0].strip("{")}
-                        tag = lambda name: "{%s}%s" % (
-                            root.tag.split("}")[0].strip("{"), name
-                        )
+servers = root.find(tag("servers"))
+if servers is None:
+    servers = ET.SubElement(root, tag("servers"))
 
-                        servers = root.find("m:servers", ns)
-                        if servers is None:
-                            servers = ET.SubElement(root, tag("servers"))
+credentials = [
+    (
+        "nexus-public",
+        "NEXUS_READ_USER",
+        "NEXUS_READ_PASSWORD",
+    ),
+    (
+        "nexus-snapshots",
+        "NEXUS_PUBLISH_USER",
+        "NEXUS_PUBLISH_PASSWORD",
+    ),
+]
 
-                        server = ET.SubElement(servers, tag("server"))
-                        ET.SubElement(server, tag("id")).text = "nexus-snapshots"
-                        ET.SubElement(server, tag("username")).text = os.environ["NEXUS_USERNAME"]
-                        ET.SubElement(server, tag("password")).text = os.environ["NEXUS_PASSWORD"]
+for server_id, username_var, password_var in credentials:
+    server = ET.SubElement(servers, tag("server"))
+    ET.SubElement(server, tag("id")).text = server_id
+    ET.SubElement(server, tag("username")).text = os.environ[username_var]
+    ET.SubElement(server, tag("password")).text = os.environ[password_var]
 
-                        tree.write(
-                            destination,
-                            encoding="UTF-8",
-                            xml_declaration=True
-                        )
-                        PY
+tree.write(destination, encoding="UTF-8", xml_declaration=True)
+PY
 
-                        mvn -B \
-                          -s "$SETTINGS_FILE" \
-                          -Dmaven.repo.local="$MAVEN_LOCAL_REPO" \
-                          deploy
-                    '''
+echo "========== Publish Maven Artifact =========="
+
+mvn -B \
+  -s "$SETTINGS_FILE" \
+  -Dmaven.repo.local="$MAVEN_LOCAL_REPO" \
+  deploy
+'''
                 }
             }
         }
 
-        stage('Verify Build Artifact') {
+        stage('Verify Artifact') {
             steps {
                 sh '''
-                    set -eu
+set -eu
 
-                    echo "Generated JARs:"
-                    find . -path '*/target/*.jar' \
-                      -type f ! -name '*-sources.jar' \
-                      ! -name '*-javadoc.jar' -print
+echo "========== Generated JAR Files =========="
 
-                    echo "Build commit:"
-                    git rev-parse HEAD
-                '''
+find . -type f -path '*/target/*.jar' \
+  ! -name '*-sources.jar' \
+  ! -name '*-javadoc.jar' \
+  -print
+
+echo "========== Built Commit =========="
+git rev-parse HEAD
+'''
             }
         }
     }
 
     post {
         success {
-            echo 'SUCCESS: Maven build and Nexus publication completed.'
+            echo 'SUCCESS: Build, tests, and Nexus publication completed.'
         }
+
         failure {
-            echo 'FAILED: Inspect the first failed stage in the Jenkins console log.'
+            echo 'FAILED: Check the first failed stage in Console Output.'
         }
+
         always {
             echo 'CI pipeline finished.'
         }
