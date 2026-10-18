@@ -21,7 +21,6 @@ pipeline {
         NEXUS_URL = 'http://nexus.nexus.svc.cluster.local:8081'
         NEXUS_GROUP_REPO = 'maven-public'
         NEXUS_SNAPSHOT_REPO = 'maven-snapshots'
-
         MAVEN_LOCAL_REPO = "${WORKSPACE}/.m2-ci"
     }
 
@@ -37,6 +36,9 @@ java -version
 
 echo "========== Maven =========="
 mvn -version
+
+echo "========== Workspace =========="
+pwd
 '''
 
                 withCredentials([
@@ -53,9 +55,9 @@ set +x
 echo "========== Nexus Connectivity =========="
 
 curl --fail --silent --show-error \
-  --user "$NEXUS_READ_USER:$NEXUS_READ_PASSWORD" \
-  "$NEXUS_URL/repository/$NEXUS_GROUP_REPO/" \
-  -o /dev/null
+    --user "$NEXUS_READ_USER:$NEXUS_READ_PASSWORD" \
+    "$NEXUS_URL/repository/$NEXUS_GROUP_REPO/" \
+    -o /dev/null
 
 echo "Nexus authentication successful."
 '''
@@ -78,6 +80,8 @@ ls -la
 
 test -f pom.xml
 test -f ci-settings.xml
+
+echo "Project files validated."
 '''
             }
         }
@@ -87,29 +91,17 @@ test -f ci-settings.xml
                 sh '''
 set -eu
 
-python3 -c '
-import xml.etree.ElementTree as ET
+echo "========== Validate Maven Mirror =========="
 
-root = ET.parse("ci-settings.xml").getroot()
-ns = {"m": root.tag.split("}")[0].strip("{")}
+grep -Eq \
+    '<mirrorOf>[[:space:]]*\\*[[:space:]]*</mirrorOf>' \
+    ci-settings.xml
 
-mirrors = root.findall("m:mirrors/m:mirror", ns)
+grep -F \
+    'http://nexus.nexus.svc.cluster.local:8081/repository/maven-public/' \
+    ci-settings.xml
 
-valid = any(
-    mirror.findtext("m:mirrorOf", default="", namespaces=ns) == "*"
-    and mirror.findtext("m:url", default="", namespaces=ns).rstrip("/").endswith(
-        "/repository/maven-public"
-    )
-    for mirror in mirrors
-)
-
-if not valid:
-    raise SystemExit(
-        "ERROR: ci-settings.xml must mirror * to Nexus maven-public"
-    )
-
-print("OK: Maven mirror points to Nexus maven-public")
-'
+echo "OK: Maven mirror points to Nexus maven-public."
 '''
             }
         }
@@ -126,40 +118,55 @@ print("OK: Maven mirror points to Nexus maven-public")
                     sh '''
 set -eu
 set +x
+umask 077
 
 SETTINGS_FILE="$(mktemp)"
-chmod 600 "$SETTINGS_FILE"
 trap 'rm -f "$SETTINGS_FILE"' EXIT
 
-python3 - "$WORKSPACE/ci-settings.xml" "$SETTINGS_FILE" <<'PY'
-import os
-import sys
-import xml.etree.ElementTree as ET
+# Escape XML special characters in credentials.
+xml_escape() {
+    printf '%s' "$1" |
+        sed \
+            -e 's/\&/\&amp;/g' \
+            -e 's/</\&lt;/g' \
+            -e 's/>/\&gt;/g' \
+            -e 's/"/\&quot;/g' \
+            -e "s/'/\\&apos;/g"
+}
 
-source, destination = sys.argv[1], sys.argv[2]
-tree = ET.parse(source)
-root = tree.getroot()
-namespace = root.tag.split("}")[0].strip("{")
-tag = lambda name: "{%s}%s" % (namespace, name)
+READ_USER_XML="$(xml_escape "$NEXUS_READ_USER")"
+READ_PASSWORD_XML="$(xml_escape "$NEXUS_READ_PASSWORD")"
 
-servers = root.find(tag("servers"))
-if servers is None:
-    servers = ET.SubElement(root, tag("servers"))
-
-server = ET.SubElement(servers, tag("server"))
-ET.SubElement(server, tag("id")).text = "nexus-public"
-ET.SubElement(server, tag("username")).text = os.environ["NEXUS_READ_USER"]
-ET.SubElement(server, tag("password")).text = os.environ["NEXUS_READ_PASSWORD"]
-
-tree.write(destination, encoding="UTF-8", xml_declaration=True)
-PY
+# Generate a temporary Maven settings file.
+cat > "$SETTINGS_FILE" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0">
+    <mirrors>
+        <mirror>
+            <id>nexus-public</id>
+            <name>Nexus Maven Group</name>
+            <url>${NEXUS_URL}/repository/${NEXUS_GROUP_REPO}/</url>
+            <mirrorOf>*</mirrorOf>
+        </mirror>
+    </mirrors>
+    <servers>
+        <server>
+            <id>nexus-public</id>
+            <username>${READ_USER_XML}</username>
+            <password>${READ_PASSWORD_XML}</password>
+        </server>
+    </servers>
+</settings>
+EOF
 
 echo "========== Maven Clean and Verify =========="
 
 mvn -B \
-  -s "$SETTINGS_FILE" \
-  -Dmaven.repo.local="$MAVEN_LOCAL_REPO" \
-  clean verify
+    -s "$SETTINGS_FILE" \
+    -Dmaven.repo.local="$MAVEN_LOCAL_REPO" \
+    clean verify
+
+echo "Maven tests and verification completed."
 '''
                 }
             }
@@ -191,54 +198,63 @@ mvn -B \
                     sh '''
 set -eu
 set +x
+umask 077
 
 SETTINGS_FILE="$(mktemp)"
-chmod 600 "$SETTINGS_FILE"
 trap 'rm -f "$SETTINGS_FILE"' EXIT
 
-python3 - "$WORKSPACE/ci-settings.xml" "$SETTINGS_FILE" <<'PY'
-import os
-import sys
-import xml.etree.ElementTree as ET
+# Escape XML special characters in credentials.
+xml_escape() {
+    printf '%s' "$1" |
+        sed \
+            -e 's/\&/\&amp;/g' \
+            -e 's/</\&lt;/g' \
+            -e 's/>/\&gt;/g' \
+            -e 's/"/\&quot;/g' \
+            -e "s/'/\\&apos;/g"
+}
 
-source, destination = sys.argv[1], sys.argv[2]
-tree = ET.parse(source)
-root = tree.getroot()
-namespace = root.tag.split("}")[0].strip("{")
-tag = lambda name: "{%s}%s" % (namespace, name)
+READ_USER_XML="$(xml_escape "$NEXUS_READ_USER")"
+READ_PASSWORD_XML="$(xml_escape "$NEXUS_READ_PASSWORD")"
+PUBLISH_USER_XML="$(xml_escape "$NEXUS_PUBLISH_USER")"
+PUBLISH_PASSWORD_XML="$(xml_escape "$NEXUS_PUBLISH_PASSWORD")"
 
-servers = root.find(tag("servers"))
-if servers is None:
-    servers = ET.SubElement(root, tag("servers"))
-
-credentials = [
-    (
-        "nexus-public",
-        "NEXUS_READ_USER",
-        "NEXUS_READ_PASSWORD",
-    ),
-    (
-        "nexus-snapshots",
-        "NEXUS_PUBLISH_USER",
-        "NEXUS_PUBLISH_PASSWORD",
-    ),
-]
-
-for server_id, username_var, password_var in credentials:
-    server = ET.SubElement(servers, tag("server"))
-    ET.SubElement(server, tag("id")).text = server_id
-    ET.SubElement(server, tag("username")).text = os.environ[username_var]
-    ET.SubElement(server, tag("password")).text = os.environ[password_var]
-
-tree.write(destination, encoding="UTF-8", xml_declaration=True)
-PY
+# Generate a temporary Maven settings file with separate read
+# and publish credentials.
+cat > "$SETTINGS_FILE" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0">
+    <mirrors>
+        <mirror>
+            <id>nexus-public</id>
+            <name>Nexus Maven Group</name>
+            <url>${NEXUS_URL}/repository/${NEXUS_GROUP_REPO}/</url>
+            <mirrorOf>*</mirrorOf>
+        </mirror>
+    </mirrors>
+    <servers>
+        <server>
+            <id>nexus-public</id>
+            <username>${READ_USER_XML}</username>
+            <password>${READ_PASSWORD_XML}</password>
+        </server>
+        <server>
+            <id>nexus-snapshots</id>
+            <username>${PUBLISH_USER_XML}</username>
+            <password>${PUBLISH_PASSWORD_XML}</password>
+        </server>
+    </servers>
+</settings>
+EOF
 
 echo "========== Publish Maven Artifact =========="
 
 mvn -B \
-  -s "$SETTINGS_FILE" \
-  -Dmaven.repo.local="$MAVEN_LOCAL_REPO" \
-  deploy
+    -s "$SETTINGS_FILE" \
+    -Dmaven.repo.local="$MAVEN_LOCAL_REPO" \
+    deploy
+
+echo "Maven deploy completed."
 '''
                 }
             }
@@ -252,12 +268,15 @@ set -eu
 echo "========== Generated JAR Files =========="
 
 find . -type f -path '*/target/*.jar' \
-  ! -name '*-sources.jar' \
-  ! -name '*-javadoc.jar' \
-  -print
+    ! -name '*-sources.jar' \
+    ! -name '*-javadoc.jar' \
+    -print
 
 echo "========== Built Commit =========="
 git rev-parse HEAD
+
+echo "========== Build Summary =========="
+echo "Application verification and Nexus deployment completed."
 '''
             }
         }
@@ -269,7 +288,7 @@ git rev-parse HEAD
         }
 
         failure {
-            echo 'FAILED: Check the first failed stage in Console Output.'
+            echo 'FAILED: Check Console Output for the first failed stage.'
         }
 
         always {
