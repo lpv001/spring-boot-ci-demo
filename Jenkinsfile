@@ -100,21 +100,22 @@ pipeline {
 
         stage('Clean and Test') {
             steps {
-                sh '''
-                    set -eu
-
-                    mvn -B \
-                      -s "$WORKSPACE/ci-settings.xml" \
-                      -Dmaven.repo.local="$MAVEN_LOCAL_REPO" \
-                      clean verify
-                '''
-            }
-            post {
-                always {
-                    junit(
-                        testResults: '**/target/surefire-reports/TEST-*.xml',
-                        allowEmptyResults: true
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'nexus-reader',
+                        usernameVariable: 'NEXUS_READ_USER',
+                        passwordVariable: 'NEXUS_READ_PASSWORD'
                     )
+                ]) {
+                    sh '''
+                        set -eu
+                        set +x
+
+                        mvn -B \
+                        -s "$WORKSPACE/ci-settings.xml" \
+                        -Dmaven.repo.local="$MAVEN_LOCAL_REPO" \
+                        clean verify
+                    '''
                 }
             }
         }
